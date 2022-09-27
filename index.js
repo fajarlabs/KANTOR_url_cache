@@ -41,6 +41,8 @@ const getCache = async (req, res, next) => {
       };
       request(options, function (error, response) {
         if (error) {
+          res.set('Content-Type', 'text/plain');
+          res.send(error);
         } else {
           // save into cache
           redisClient.set(key, response.body, {
