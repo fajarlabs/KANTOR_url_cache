@@ -4,28 +4,29 @@ const redis = require("redis");
 const request = require('request');
 
 const app = express();
+// webservice port
 const port = 8189;
+// support parsing of application/json type post data
+app.use(bodyParser.json());
+// support parsing of application/x-www-form-urlencoded post data
+app.use(bodyParser.urlencoded({ extended: true }));
+// history call url
 const history_call = [];
 
-app.use(bodyParser.json());
-app.use(
-  bodyParser.urlencoded({
-    extended: true,
-  })
-);
-
-var redisClient;
-
 (async () => {
-  redisClient = redis.createClient();
-  redisClient.on("error", (error) => console.error(`Error : ${error}`));
-  await redisClient.connect();
+  global.redisClient = redis.createClient({
+    host: 'localhost',
+    port: 6379
+  });
+
+  global.redisClient.on("error", (error) => console.error(`Error : ${error}`));
+  await global.redisClient.connect();
 
   // auto checking value expired
   setInterval(() => {
     for (const hc of history_call) {
       (async () => {
-        let val = await redisClient.get(hc.key)
+        let val = await global.redisClient.get(hc.key)
         if (val) {
         } else {
           console.log(`Re-new key : ${hc.key}`)
@@ -37,6 +38,25 @@ var redisClient;
     }
   }, 1000);
 })();
+
+/**
+ * Get headers
+ * @param {object} res 
+ * @param {string} content_type 
+ */
+const getHeader = (res, content_type) => {
+  if (content_type == 'json') { // response json
+    res.setHeader('Content-Type', 'application/json');
+  } else if (content_type == 'html') { // response html
+    res.setHeader('Content-Type', 'text/html');
+  } else if (content_type == 'csv') { // response csv
+    res.setHeader('Content-Type', 'text/csv')
+  } else if (content_type == 'xml') { // response csv
+    res.setHeader('Content-Type', 'text/xml')
+  } else {
+    res.setHeader('Content-Type', 'text/plain'); // response text
+  }
+}
 
 /**
  * Function request GET
@@ -56,11 +76,15 @@ const callGet = (key, url, expire, calback) => {
       calback(error)
     } else {
       // save into cache
-      redisClient.set(key, response.body, {
-        EX: expire,
-        NX: true,
-      });
-      calback(response.body)
+      try {
+        global.redisClient.set(key, response.body, {
+          EX: expire,
+          NX: true,
+        });
+        calback(response.body)
+      } catch (e) {
+        calback(e)
+      }
     }
   });
 }
@@ -71,11 +95,12 @@ const callGet = (key, url, expire, calback) => {
  * @param {object} res 
  * @param {object} next 
  */
-const getCache = async (req, res, next) => {
+const getProxyCache = async (req, res, next) => {
 
   const key = req.query.key
   const url = Buffer.from(req.query.url, 'base64').toString('ascii')
   const expire = parseInt(req.query.expire)
+  const content_type = req.query.content_type
 
   if (history_call.length > 0) {
     history_call.forEach((value, index, array) => {
@@ -89,31 +114,90 @@ const getCache = async (req, res, next) => {
   }
 
   try {
-    const cacheResults = await redisClient.get(key);
+    const cacheResults = await global.redisClient.get(key);
     // check redis from cache
     if (cacheResults) {
       // expose data
-      res.set('Content-Type', 'text/plain');
+      getHeader(res, content_type)
       res.send(cacheResults);
     } else {
       // request & expose data
       callGet(key, url, expire, (response) => {
-        res.set('Content-Type', 'text/plain');
+        getHeader(res, content_type)
         res.send(response);
       })
     }
   } catch (e) {
     console.log(e)
-    res.set('Content-Type', 'text/plain');
-    res.send('No data');
+    getHeader(res, content_type)
+    res.send(e);
   }
 }
 
-app.get('/', (req, res) => {
-  res.json({ info: 'Proxy for Helper High Load API' });
-});
+/**
+ * Function set cache
+ * @param {express} req 
+ * @param {express} res 
+ * @param {express} next 
+ */
+const setCache = async (req, res, next) => {
+  const key = req.body.key
+  const content_type = req.body.content_type
+  const content = req.body.content
+  const expire = parseInt(req.body.expire)
 
-app.get('/getCache', getCache)
+  try {
+    global.redisClient.set(key, content, {
+      EX: expire,
+      NX: true,
+    });
+    getHeader(res, content_type)
+    res.send('Success');
+  } catch (e) {
+    getHeader(res, content_type)
+    res.send(e);
+  }
+}
+
+/**
+ * Get cache function
+ * @param {express} req 
+ * @param {express} res 
+ * @param {express} next 
+ */
+const getCache = async (req, res, next) => {
+  try {
+    const key = req.query.key
+    const content_type = req.query.content_type
+    const cacheResults = await global.redisClient.get(key);
+    // check redis from cache
+    if (cacheResults) {
+      getHeader(res, content_type)
+      res.send(cacheResults);
+    } else {
+      getHeader(res, content_type)
+      res.send('No data');
+    }
+  } catch (e) {
+    console.log(e)
+    getHeader(res, content_type)
+    res.send(e);
+  }
+}
+
+/**
+ * Index function
+ * @param {express} req 
+ * @param {express} res 
+ */
+const getIndex = async (req, res) => {
+  res.json({ info: 'Proxy for Helper High Load API' });
+}
+
+app.get('/', getIndex)
+app.get('/getProxyCache', getProxyCache)
+app.post('/set', setCache)
+app.get('/get', getCache)
 
 app.listen(port, () => {
   console.log(`App running on port ${port}.`);
